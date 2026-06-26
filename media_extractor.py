@@ -885,16 +885,17 @@ class App(tk.Tk):
             col = i % 4
             row = i // 4
 
-            tf = tk.Frame(theme_grid, bg=self.t["surface"])
+            tf = tk.Frame(theme_grid, bg=self.t["surface"], cursor="hand2")
             tf.grid(row=row, column=col, padx=4, pady=4, sticky="ew")
             theme_grid.columnconfigure(col, weight=1)
 
             swatch = tk.Frame(tf, bg=pal["bg"], height=28, highlightthickness=2,
-                              highlightbackground=self.t["accent"] if is_current else self.t["border"])
+                              highlightbackground=self.t["accent"] if is_current else self.t["border"],
+                              cursor="hand2")
             swatch.pack(fill="x")
             swatch.pack_propagate(False)
 
-            dots = tk.Frame(swatch, bg=pal["bg"])
+            dots = tk.Frame(swatch, bg=pal["bg"], cursor="hand2")
             dots.pack(expand=True)
             for c in [pal["accent"], pal["success"], pal["danger"]]:
                 tk.Frame(dots, bg=c, width=6, height=6).pack(side="left", padx=1)
