@@ -120,6 +120,11 @@ def load_config():
         "audio_bitrate": "320k",
         "encrypt": False,
         "encryption_password": "",
+        "concurrent_fragments": 8,
+        "chunk_size_mb": 10,
+        "max_cpu_cores": os.cpu_count() or 4,
+        "max_ram_mb": 512,
+        "process_priority": "normal",
     }
     if CONFIG_FILE.exists():
         try:
@@ -185,7 +190,7 @@ def find_ytdlp():
             return str(p)
     return ""
 
-def download_url(url, folder, vid_fmt, quality, aud_fmt, aud_bit):
+def download_url(url, folder, vid_fmt, quality, aud_fmt, aud_bit, fragments=8, chunk_mb=10, priority="normal"):
     ytdlp = find_ytdlp()
     if not ytdlp:
         return {"ok": False, "error": "yt-dlp not found", "ext": "", "bytes": 0, "title": ""}
@@ -194,8 +199,9 @@ def download_url(url, folder, vid_fmt, quality, aud_fmt, aud_bit):
     args = [
         ytdlp, url, "-o", "%(title)s.%(ext)s", "-P", folder,
         "--no-playlist", "--no-overwrites",
-        "--concurrent-fragments", "4", "--retries", "3",
-        "--fragment-retries", "3", "--buffer-size", "16K",
+        "--concurrent-fragments", str(fragments), "--retries", "5",
+        "--fragment-retries", "5", "--buffer-size", "64K",
+        "--http-chunk-size", f"{chunk_mb}M",
     ]
     is_audio_url = any(s in url.lower() for s in ["soundcloud.com", "spotify.com"])
     if is_audio_url:
@@ -216,8 +222,14 @@ def download_url(url, folder, vid_fmt, quality, aud_fmt, aud_bit):
 
     args += ["--print-json"]
     try:
+        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        if sys.platform == "win32":
+            if priority == "low":
+                creationflags |= 0x00000040  # IDLE_PRIORITY_CLASS
+            elif priority == "high":
+                creationflags |= 0x00000080  # HIGH_PRIORITY_CLASS
         result = subprocess.run(args, capture_output=True, text=True, timeout=600,
-                                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+                                creationflags=creationflags)
         if result.returncode == 0:
             try:
                 info = json.loads(result.stdout.strip().split("\n")[-1])
@@ -361,6 +373,7 @@ class App(tk.Tk):
         buttons = [
             ("Media", "media"),
             ("CSV Extractor", "csv"),
+            ("Documents", "documents"),
         ]
         for label, page in buttons:
             self._sidebar_btn(label, page)
@@ -404,6 +417,7 @@ class App(tk.Tk):
         {
             "media": self._page_media,
             "csv": self._page_csv,
+            "documents": self._page_documents,
             "settings": self._page_settings,
             "logs": self._page_logs,
         }.get(page, self._page_media)()
@@ -515,7 +529,10 @@ class App(tk.Tk):
 
         def run():
             result = download_url(url, folder, self.vid_fmt_var.get(), self.vid_qual_var.get(),
-                                  self.aud_fmt_var.get(), self.aud_bit_var.get())
+                                  self.aud_fmt_var.get(), self.aud_bit_var.get(),
+                                  self.config_data.get("concurrent_fragments", 8),
+                                  self.config_data.get("chunk_size_mb", 10),
+                                  self.config_data.get("process_priority", "normal"))
             entry = {
                 "id": str(uuid.uuid4()), "url": url, "date": datetime.now().isoformat(),
                 "status": "complete" if result["ok"] else "failed",
@@ -690,6 +707,133 @@ class App(tk.Tk):
         except Exception:
             return False
 
+    # ── Documents Page ────────────────────────────────────────────
+
+    def _page_documents(self):
+        scroll = self._scrollable(self.content)
+        self._heading(scroll, "Documents", "Read PDFs and EPUBs with a fast, minimal viewer")
+
+        btn_row = tk.Frame(scroll, bg=self.t["bg"])
+        btn_row.pack(fill="x", pady=(0, 16))
+
+        open_btn = tk.Label(btn_row, text="\U0001f4c4  Open Document", font=("Segoe UI", 11, "bold"),
+                            fg=self.t["accent"], bg=self.t["surface"], padx=20, pady=14, cursor="hand2")
+        open_btn.pack()
+        open_btn.bind("<Button-1>", self._open_document)
+
+        tk.Label(btn_row, text="Supports PDF and EPUB files", font=("Segoe UI", 8),
+                 fg=self.t["muted"], bg=self.t["bg"]).pack(pady=(4, 0))
+
+        recent = self.config_data.get("recent_documents", [])
+        if recent:
+            self._heading(scroll, "Recent Documents", "")
+            for path in recent[:10]:
+                if os.path.exists(path):
+                    row = tk.Frame(scroll, bg=self.t["surface"], highlightthickness=1,
+                                   highlightbackground=self.t["border"])
+                    row.pack(fill="x", pady=1)
+                    fname = os.path.basename(path)
+                    icon = "PDF" if fname.lower().endswith(".pdf") else "EPUB"
+                    tk.Label(row, text=f"  {icon}  {fname}", font=("Segoe UI", 9),
+                             fg=self.t["text"], bg=self.t["surface"], anchor="w",
+                             padx=8, pady=8, cursor="hand2").pack(side="left", fill="x", expand=True)
+                    row.bind("<Button-1>", lambda e, p=path: self._view_document(p))
+                    for child in row.winfo_children():
+                        child.bind("<Button-1>", lambda e, p=path: self._view_document(p))
+
+    def _open_document(self, event=None):
+        filepath = filedialog.askopenfilename(filetypes=[("Documents", "*.pdf *.epub"), ("PDF files", "*.pdf"), ("EPUB files", "*.epub")])
+        if filepath:
+            self._view_document(filepath)
+
+    def _view_document(self, filepath):
+        recent = self.config_data.get("recent_documents", [])
+        if filepath in recent:
+            recent.remove(filepath)
+        recent.insert(0, filepath)
+        self.config_data["recent_documents"] = recent[:10]
+        save_config(self.config_data)
+
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext == ".pdf":
+            self._view_pdf(filepath)
+        elif ext == ".epub":
+            self._view_epub(filepath)
+
+    def _view_pdf(self, filepath):
+        for w in self.content.winfo_children():
+            w.destroy()
+
+        toolbar = tk.Frame(self.content, bg=self.t["surface"])
+        toolbar.pack(fill="x")
+
+        back_btn = tk.Label(toolbar, text="← Library", font=("Segoe UI", 9, "bold"),
+                            fg=self.t["accent"], bg=self.t["surface"], padx=12, pady=6, cursor="hand2")
+        back_btn.pack(side="left")
+        back_btn.bind("<Button-1>", lambda e: self._show_page("documents"))
+
+        tk.Label(toolbar, text=os.path.basename(filepath), font=("Segoe UI", 9, "bold"),
+                 fg=self.t["text"], bg=self.t["surface"]).pack(side="left", padx=12)
+
+        try:
+            if sys.platform == "win32":
+                os.startfile(filepath)
+            else:
+                subprocess.run(["open", filepath])
+        except Exception:
+            pass
+
+        info = tk.Frame(self.content, bg=self.t["bg"])
+        info.pack(fill="both", expand=True)
+
+        fsize = os.path.getsize(filepath) if os.path.exists(filepath) else 0
+
+        tk.Label(info, text="\U0001f4c4", font=("Segoe UI", 48), fg=self.t["muted"],
+                 bg=self.t["bg"]).pack(pady=(40, 10))
+        tk.Label(info, text=os.path.basename(filepath), font=("Segoe UI", 14, "bold"),
+                 fg=self.t["text"], bg=self.t["bg"]).pack()
+        tk.Label(info, text=f"Size: {fmt_bytes(fsize)}", font=("Segoe UI", 9),
+                 fg=self.t["muted"], bg=self.t["bg"]).pack(pady=(4, 0))
+        tk.Label(info, text="Opened in your default PDF viewer", font=("Segoe UI", 9),
+                 fg=self.t["accent"], bg=self.t["bg"]).pack(pady=(8, 0))
+
+    def _view_epub(self, filepath):
+        for w in self.content.winfo_children():
+            w.destroy()
+
+        toolbar = tk.Frame(self.content, bg=self.t["surface"])
+        toolbar.pack(fill="x")
+
+        back_btn = tk.Label(toolbar, text="← Library", font=("Segoe UI", 9, "bold"),
+                            fg=self.t["accent"], bg=self.t["surface"], padx=12, pady=6, cursor="hand2")
+        back_btn.pack(side="left")
+        back_btn.bind("<Button-1>", lambda e: self._show_page("documents"))
+
+        tk.Label(toolbar, text=os.path.basename(filepath), font=("Segoe UI", 9, "bold"),
+                 fg=self.t["text"], bg=self.t["surface"]).pack(side="left", padx=12)
+
+        try:
+            if sys.platform == "win32":
+                os.startfile(filepath)
+            else:
+                subprocess.run(["open", filepath])
+        except Exception:
+            pass
+
+        info = tk.Frame(self.content, bg=self.t["bg"])
+        info.pack(fill="both", expand=True)
+
+        fsize = os.path.getsize(filepath) if os.path.exists(filepath) else 0
+
+        tk.Label(info, text="\U0001f4d6", font=("Segoe UI", 48), fg=self.t["muted"],
+                 bg=self.t["bg"]).pack(pady=(40, 10))
+        tk.Label(info, text=os.path.basename(filepath), font=("Segoe UI", 14, "bold"),
+                 fg=self.t["text"], bg=self.t["bg"]).pack()
+        tk.Label(info, text=f"Size: {fmt_bytes(fsize)}", font=("Segoe UI", 9),
+                 fg=self.t["muted"], bg=self.t["bg"]).pack(pady=(4, 0))
+        tk.Label(info, text="Opened in your default EPUB reader", font=("Segoe UI", 9),
+                 fg=self.t["accent"], bg=self.t["bg"]).pack(pady=(8, 0))
+
     # ── Settings Page ─────────────────────────────────────────────
 
     def _page_settings(self):
@@ -780,6 +924,10 @@ class App(tk.Tk):
         self._settings_card(scroll, "Encryption",
                             "Protect downloads with AES-256-GCM encryption.",
                             self._build_encryption_setting)
+
+        self._settings_card(scroll, "Performance",
+                            "Fine-tune download speed vs resource usage.",
+                            self._build_performance_setting)
 
         self._settings_card(scroll, "Export as ZIP",
                             "Bundle your downloads into a .zip file.",
@@ -899,6 +1047,56 @@ class App(tk.Tk):
         else:
             self.enc_pw_entry.pack_forget()
         self.config_data["encryption_password"] = self.enc_pw_entry.get()
+        save_config(self.config_data)
+
+    def _build_performance_setting(self, parent):
+        row1 = tk.Frame(parent, bg=self.t["surface"])
+        row1.pack(fill="x", pady=2)
+        tk.Label(row1, text="Threads", font=("Segoe UI", 9), fg=self.t["muted"],
+                 bg=self.t["surface"]).pack(side="left")
+        threads_cb = ttk.Combobox(row1, values=["1", "2", "4", "8", "12", "16"], width=5, state="readonly")
+        threads_cb.set(str(self.config_data.get("concurrent_fragments", 8)))
+        threads_cb.pack(side="left", padx=8)
+        threads_cb.bind("<<ComboboxSelected>>", lambda e: self._save_perf("concurrent_fragments", int(threads_cb.get())))
+
+        tk.Label(row1, text="Chunk Size", font=("Segoe UI", 9), fg=self.t["muted"],
+                 bg=self.t["surface"]).pack(side="left", padx=(16, 0))
+        chunk_cb = ttk.Combobox(row1, values=["5 MB", "10 MB", "25 MB", "50 MB", "100 MB"], width=7, state="readonly")
+        chunk_cb.set(f"{self.config_data.get('chunk_size_mb', 10)} MB")
+        chunk_cb.pack(side="left", padx=8)
+        chunk_cb.bind("<<ComboboxSelected>>", lambda e: self._save_perf("chunk_size_mb", int(chunk_cb.get().replace(" MB", ""))))
+
+        row2 = tk.Frame(parent, bg=self.t["surface"])
+        row2.pack(fill="x", pady=2)
+        cpu_count = os.cpu_count() or 4
+        tk.Label(row2, text="CPU Cores", font=("Segoe UI", 9), fg=self.t["muted"],
+                 bg=self.t["surface"]).pack(side="left")
+        cpu_cb = ttk.Combobox(row2, values=[str(i) for i in range(1, cpu_count + 1)], width=5, state="readonly")
+        cpu_cb.set(str(self.config_data.get("max_cpu_cores", cpu_count)))
+        cpu_cb.pack(side="left", padx=8)
+        cpu_cb.bind("<<ComboboxSelected>>", lambda e: self._save_perf("max_cpu_cores", int(cpu_cb.get())))
+
+        tk.Label(row2, text="RAM Limit", font=("Segoe UI", 9), fg=self.t["muted"],
+                 bg=self.t["surface"]).pack(side="left", padx=(16, 0))
+        ram_cb = ttk.Combobox(row2, values=["256 MB", "512 MB", "1024 MB", "2048 MB", "4096 MB"], width=8, state="readonly")
+        ram_cb.set(f"{self.config_data.get('max_ram_mb', 512)} MB")
+        ram_cb.pack(side="left", padx=8)
+        ram_cb.bind("<<ComboboxSelected>>", lambda e: self._save_perf("max_ram_mb", int(ram_cb.get().replace(" MB", ""))))
+
+        row3 = tk.Frame(parent, bg=self.t["surface"])
+        row3.pack(fill="x", pady=2)
+        tk.Label(row3, text="Priority", font=("Segoe UI", 9), fg=self.t["muted"],
+                 bg=self.t["surface"]).pack(side="left")
+        pri_cb = ttk.Combobox(row3, values=["low", "normal", "high"], width=8, state="readonly")
+        pri_cb.set(self.config_data.get("process_priority", "normal"))
+        pri_cb.pack(side="left", padx=8)
+        pri_cb.bind("<<ComboboxSelected>>", lambda e: self._save_perf("process_priority", pri_cb.get()))
+
+        tk.Label(parent, text="More threads & larger chunks = faster downloads. Lower priority = less system impact.",
+                 font=("Segoe UI", 8), fg=self.t["muted"], bg=self.t["surface"], wraplength=500).pack(anchor="w", pady=(4, 0))
+
+    def _save_perf(self, key, val):
+        self.config_data[key] = val
         save_config(self.config_data)
 
     def _build_zip_setting(self, parent):
