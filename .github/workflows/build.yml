@@ -1,0 +1,83 @@
+name: Build Windows Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build EXE
+        run: |
+          pyinstaller --noconfirm --onefile --windowed `
+            --name "MediaExtractor" `
+            --icon "icon.ico" `
+            --add-data "icon.ico;." `
+            media_extractor.py
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+
+      - name: Build Installer
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MediaExtractor-Portable
+          path: dist/MediaExtractor.exe
+
+      - name: Upload Installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MediaExtractor-Setup
+          path: Output/MediaExtractor-Setup-v2.0.exe
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/MediaExtractor.exe
+            Output/MediaExtractor-Setup-v2.0.exe
+          body: |
+            ## Media Extractor ${{ github.ref_name }} — Windows
+
+            ### Install
+
+            **Option 1 — Portable EXE (no install needed)**
+            Download `MediaExtractor.exe`, put it anywhere, double-click to run.
+
+            **Option 2 — Installer**
+            Download `MediaExtractor-Setup-v2.0.exe`, run it, follow the steps.
+
+            ### Requirements
+            - Windows 10 or later (64-bit)
+            - [yt-dlp](https://github.com/yt-dlp/yt-dlp/releases/latest) — download `yt-dlp.exe` and place it in your PATH
+
+            ### Features
+            - Download from YouTube, TikTok, Instagram, Twitter, SoundCloud, Spotify, Reddit, Facebook
+            - 8 themes: Midnight, Dracula, Catppuccin, One Dark, Nord, Ayu, Light, Rosé Pine
+            - CSV batch URL extraction & download
+            - Format & quality selection (video + audio)
+            - AES-256-GCM file encryption
+            - Download history & activity logs
+            - ZIP export
