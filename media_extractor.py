@@ -429,6 +429,10 @@ class App(tk.Tk):
 
         self._heading(scroll, "Media Downloader", "Paste any media link to download")
 
+        self.clip_banner = tk.Frame(scroll, bg=self.t["accent"])
+        self.clip_url = ""
+        self._start_clipboard_watcher()
+
         url_frame = tk.Frame(scroll, bg=self.t["surface"], highlightthickness=1,
                              highlightbackground=self.t["border"])
         url_frame.pack(fill="x", pady=(0, 8))
@@ -527,6 +531,9 @@ class App(tk.Tk):
             badge = tk.Label(pf, text="Ad-Free Preview", font=("Segoe UI", 8),
                              fg=self.t["accent"], bg=self.t["surface"])
             badge.pack(anchor="e", padx=12, pady=(0, 8))
+        if url and any(s in url for s in ["youtube.com", "youtu.be", "tiktok.com", "instagram.com",
+                                           "twitter.com", "x.com", "soundcloud.com", "vimeo.com"]):
+            self._fetch_media_meta()
 
     def _start_download(self, event=None):
         url = self.url_var.get().strip()
@@ -931,6 +938,87 @@ class App(tk.Tk):
             stats["platforms"][p] = stats["platforms"].get(p, 0) + 1
             self.config_data["download_stats"] = stats
             save_config(self.config_data)
+
+    def _start_clipboard_watcher(self):
+        self._last_clip = ""
+        supported = ["youtube.com", "youtu.be", "tiktok.com", "instagram.com",
+                      "twitter.com", "x.com", "soundcloud.com", "spotify.com",
+                      "vimeo.com", "dailymotion.com", "twitch.tv", "reddit.com"]
+        def poll():
+            try:
+                clip = self.clipboard_get()
+            except Exception:
+                clip = ""
+            if clip and clip != self._last_clip and any(s in clip for s in supported):
+                self._last_clip = clip
+                self.clip_url = clip
+                self.after(0, lambda: self._show_clip_banner(clip))
+            self.after(1500, poll)
+        self.after(1500, poll)
+
+    def _show_clip_banner(self, url):
+        for w in self.clip_banner.winfo_children():
+            w.destroy()
+        self.clip_banner.pack(fill="x", pady=(0, 8))
+        short = url[:60] + "..." if len(url) > 60 else url
+        tk.Label(self.clip_banner, text=f"\U0001f4cb  {short}", font=("Segoe UI", 9),
+                 fg="#ffffff", bg=self.t["accent"]).pack(side="left", padx=8, pady=6)
+        use_btn = tk.Label(self.clip_banner, text="Use", font=("Segoe UI", 9, "bold"),
+                           fg=self.t["accent"], bg="#ffffff", cursor="hand2", padx=8, pady=2)
+        use_btn.pack(side="right", padx=(0, 8))
+        use_btn.bind("<Button-1>", lambda e: self._use_clip(url))
+        dismiss = tk.Label(self.clip_banner, text="✕", font=("Segoe UI", 9),
+                           fg="#ffffff", bg=self.t["accent"], cursor="hand2")
+        dismiss.pack(side="right", padx=(0, 4))
+        dismiss.bind("<Button-1>", lambda e: self.clip_banner.pack_forget())
+
+    def _use_clip(self, url):
+        self.url_var.set(url)
+        self._on_url_change()
+        self.clip_banner.pack_forget()
+
+    def _fetch_media_meta(self):
+        url = self.url_var.get().strip()
+        if not url:
+            return
+        self.status_label.config(text="Fetching info...", fg=self.t["accent"])
+        def fetch():
+            try:
+                yt_dlp = shutil.which("yt-dlp")
+                if not yt_dlp:
+                    return
+                proc = subprocess.run([yt_dlp, "--dump-json", "--no-download", url],
+                                       capture_output=True, text=True, timeout=15,
+                                       creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+                if proc.returncode == 0:
+                    data = json.loads(proc.stdout)
+                    title = data.get("title", "Unknown")
+                    dur = int(data.get("duration", 0))
+                    mins, secs = divmod(dur, 60)
+                    duration = f"{mins}:{secs:02d}" if dur else "N/A"
+                    size = data.get("filesize") or data.get("filesize_approx", 0)
+                    uploader = data.get("uploader", "Unknown")
+                    self.after(0, lambda: self._show_meta_card(title, uploader, duration, fmt_bytes(size)))
+                else:
+                    self.after(0, lambda: self.status_label.config(text="", fg=self.t["muted"]))
+            except Exception:
+                self.after(0, lambda: self.status_label.config(text="", fg=self.t["muted"]))
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def _show_meta_card(self, title, uploader, duration, size):
+        self.status_label.config(text="")
+        for w in self.preview_frame.winfo_children():
+            w.destroy()
+        card = tk.Frame(self.preview_frame, bg=self.t["surface"], highlightthickness=1,
+                        highlightbackground=self.t["border"])
+        card.pack(fill="x")
+        tk.Label(card, text=title, font=("Segoe UI", 10, "bold"), fg=self.t["text"],
+                 bg=self.t["surface"], wraplength=500, anchor="w").pack(anchor="w", padx=12, pady=(8, 2))
+        info_row = tk.Frame(card, bg=self.t["surface"])
+        info_row.pack(fill="x", padx=12, pady=(0, 8))
+        for txt in [uploader, duration, size]:
+            tk.Label(info_row, text=txt, font=("Segoe UI", 8), fg=self.t["muted"],
+                     bg=self.t["surface"]).pack(side="left", padx=(0, 12))
 
     # ── Documents Page ────────────────────────────────────────────
 
