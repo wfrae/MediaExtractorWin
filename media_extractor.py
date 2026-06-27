@@ -328,6 +328,8 @@ class App(tk.Tk):
         self.current_page = "media"
         self.download_thread = None
         self.csv_futures = []
+        self.download_queue = []
+        self.queue_processing = False
 
         self._build_ui()
         self._show_page("media")
@@ -778,12 +780,24 @@ class App(tk.Tk):
         urls = [u.strip() for u in text.split("\n") if u.strip()]
         if not urls:
             return
-        folder = self.config_data.get("download_folder", str(Path.home() / "Downloads" / "MediaExtractor"))
-        for url in urls:
-            threading.Thread(target=self._queue_download_one, args=(url, folder), daemon=True).start()
+        self.download_queue.extend(urls)
         for w in self.extra_frame.winfo_children():
             w.destroy()
-        self.status_label.config(text=f"Queued {len(urls)} downloads", fg=self.t["accent"])
+        self.status_label.config(text=f"Queued {len(urls)} downloads ({len(self.download_queue)} total in queue)", fg=self.t["accent"])
+        if not self.queue_processing:
+            threading.Thread(target=self._process_queue, daemon=True).start()
+
+    def _process_queue(self):
+        self.queue_processing = True
+        folder = self.config_data.get("download_folder", str(Path.home() / "Downloads" / "MediaExtractor"))
+        while self.download_queue:
+            url = self.download_queue.pop(0)
+            remaining = len(self.download_queue)
+            self.after(0, lambda u=url, r=remaining: self.status_label.config(
+                text=f"Downloading: {u[:50]}... ({r} remaining)", fg=self.t["accent"]))
+            self._queue_download_one(url, folder)
+        self.queue_processing = False
+        self.after(0, lambda: self.status_label.config(text="Queue complete", fg=self.t["success"]))
 
     def _queue_download_one(self, url, folder):
         result = download_url(url, folder, self.vid_fmt_var.get(), self.vid_qual_var.get(),
