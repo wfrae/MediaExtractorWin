@@ -472,8 +472,18 @@ class App(tk.Tk):
         self._dropdown_row(aud_card, "Format", self.aud_fmt_var, ["mp3", "m4a", "wav", "opus"])
         self._dropdown_row(aud_card, "Bitrate", self.aud_bit_var, ["320k", "256k", "192k", "128k"])
 
+        tool_row = tk.Frame(scroll, bg=self.t["bg"])
+        tool_row.pack(fill="x", pady=(0, 8))
+        self._tool_btn(tool_row, "Batch Paste", self._toggle_batch_paste).pack(side="left", padx=(0, 6))
+        self._tool_btn(tool_row, "Scheduler", self._toggle_scheduler).pack(side="left", padx=(0, 6))
+        self._tool_btn(tool_row, "Convert", self._toggle_convert).pack(side="left", padx=(0, 6))
+        stats_btn = tk.Label(tool_row, text="\U0001f4ca", font=("Segoe UI", 12), fg=self.t["muted"],
+                              bg=self.t["bg"], cursor="hand2")
+        stats_btn.pack(side="right")
+        stats_btn.bind("<Button-1>", lambda e: self._toggle_stats())
+
         self.dl_btn = tk.Label(scroll, text="⬇  Download", font=("Segoe UI", 11, "bold"),
-                               fg=self.t["text"], bg=self.t["accent"] if self.theme_name != "Light" else self.t["accent"],
+                               fg=self.t["text"], bg=self.t["accent"],
                                cursor="hand2", padx=20, pady=12, anchor="center")
         self.dl_btn.pack(fill="x", pady=(0, 8))
         self.dl_btn.bind("<Button-1>", self._start_download)
@@ -481,6 +491,9 @@ class App(tk.Tk):
         self.status_label = tk.Label(scroll, text="", font=("Segoe UI", 9),
                                      fg=self.t["muted"], bg=self.t["bg"])
         self.status_label.pack(fill="x", pady=(0, 8))
+
+        self.extra_frame = tk.Frame(scroll, bg=self.t["bg"])
+        self.extra_frame.pack(fill="x")
 
         if self.history:
             self._heading(scroll, "Download History", "")
@@ -550,6 +563,7 @@ class App(tk.Tk):
 
             self.history.append(entry)
             save_history(self.history)
+            self._update_stats(entry)
             add_log(self.logs, "info" if result["ok"] else "error",
                     f"{'Downloaded' if result['ok'] else 'Failed'}: {url}" + (f" — {result['error']}" if result.get('error') else ""))
             save_logs(self.logs)
@@ -706,6 +720,217 @@ class App(tk.Tk):
                 return True
         except Exception:
             return False
+
+    # ── Tool buttons & feature panels ────────────────────────────
+
+    def _tool_btn(self, parent, label, command):
+        btn = tk.Label(parent, text=f"  {label}", font=("Segoe UI", 9),
+                       fg=self.t["muted"], bg=self.t["surface"], cursor="hand2",
+                       padx=10, pady=5)
+        btn.bind("<Button-1>", lambda e: command())
+        btn.bind("<Enter>", lambda e: btn.configure(fg=self.t["accent"], bg=self.t["surface_hover"]))
+        btn.bind("<Leave>", lambda e: btn.configure(fg=self.t["muted"], bg=self.t["surface"]))
+        return btn
+
+    def _toggle_batch_paste(self):
+        for w in self.extra_frame.winfo_children():
+            w.destroy()
+        card = tk.Frame(self.extra_frame, bg=self.t["surface"], highlightthickness=1,
+                        highlightbackground=self.t["border"])
+        card.pack(fill="x", pady=(0, 8))
+        hdr = tk.Frame(card, bg=self.t["surface"])
+        hdr.pack(fill="x", padx=12, pady=(8, 4))
+        tk.Label(hdr, text="Batch Paste", font=("Segoe UI", 10, "bold"),
+                 fg=self.t["text"], bg=self.t["surface"]).pack(side="left")
+        self.batch_count_lbl = tk.Label(hdr, text="0 URLs", font=("Segoe UI", 8),
+                                         fg=self.t["muted"], bg=self.t["surface"])
+        self.batch_count_lbl.pack(side="right")
+
+        self.batch_text = tk.Text(card, height=5, font=("Consolas", 9), bg=self.t["bg"],
+                                   fg=self.t["text"], insertbackground=self.t["text"],
+                                   relief="flat", border=0, wrap="word")
+        self.batch_text.pack(fill="x", padx=12, pady=4)
+        self.batch_text.bind("<KeyRelease>", self._update_batch_count)
+
+        bot = tk.Frame(card, bg=self.t["surface"])
+        bot.pack(fill="x", padx=12, pady=(0, 8))
+        tk.Label(bot, text="One URL per line", font=("Segoe UI", 8),
+                 fg=self.t["muted"], bg=self.t["surface"]).pack(side="left")
+        queue_btn = tk.Label(bot, text="Queue All", font=("Segoe UI", 9, "bold"),
+                              fg="#ffffff", bg=self.t["accent"], cursor="hand2", padx=12, pady=4)
+        queue_btn.pack(side="right")
+        queue_btn.bind("<Button-1>", self._queue_batch)
+
+    def _update_batch_count(self, event=None):
+        text = self.batch_text.get("1.0", "end").strip()
+        count = len([u for u in text.split("\n") if u.strip()])
+        self.batch_count_lbl.config(text=f"{count} URLs")
+
+    def _queue_batch(self, event=None):
+        text = self.batch_text.get("1.0", "end").strip()
+        urls = [u.strip() for u in text.split("\n") if u.strip()]
+        if not urls:
+            return
+        folder = self.config_data.get("download_folder", str(Path.home() / "Downloads" / "MediaExtractor"))
+        for url in urls:
+            threading.Thread(target=self._queue_download_one, args=(url, folder), daemon=True).start()
+        for w in self.extra_frame.winfo_children():
+            w.destroy()
+        self.status_label.config(text=f"Queued {len(urls)} downloads", fg=self.t["accent"])
+
+    def _queue_download_one(self, url, folder):
+        result = download_url(url, folder, self.vid_fmt_var.get(), self.vid_qual_var.get(),
+                              self.aud_fmt_var.get(), self.aud_bit_var.get(),
+                              self.config_data.get("concurrent_fragments", 8),
+                              self.config_data.get("chunk_size_mb", 10),
+                              self.config_data.get("process_priority", "normal"))
+        entry = {
+            "id": str(uuid.uuid4()), "url": url, "date": datetime.now().isoformat(),
+            "status": "complete" if result["ok"] else "failed",
+            "title": result.get("title", "Media"), "ext": result.get("ext", ""),
+            "bytes": result.get("bytes", 0), "error": result.get("error"),
+            "path": result.get("path", ""),
+        }
+        name, _ = detect_platform(url)
+        entry["platform"] = name or "Unknown"
+        self.history.append(entry)
+        save_history(self.history)
+        self._update_stats(entry)
+
+    def _toggle_scheduler(self):
+        for w in self.extra_frame.winfo_children():
+            w.destroy()
+        card = tk.Frame(self.extra_frame, bg=self.t["surface"], highlightthickness=1,
+                        highlightbackground=self.t["border"])
+        card.pack(fill="x", pady=(0, 8))
+        tk.Label(card, text="Schedule Download", font=("Segoe UI", 10, "bold"),
+                 fg=self.t["text"], bg=self.t["surface"]).pack(anchor="w", padx=12, pady=(8, 4))
+        tk.Label(card, text="Enter minutes from now to start download",
+                 font=("Segoe UI", 8), fg=self.t["muted"], bg=self.t["surface"]).pack(anchor="w", padx=12)
+        row = tk.Frame(card, bg=self.t["surface"])
+        row.pack(fill="x", padx=12, pady=(4, 8))
+        self.sched_mins = tk.StringVar(value="30")
+        tk.Entry(row, textvariable=self.sched_mins, font=("Consolas", 10), width=6,
+                 bg=self.t["bg"], fg=self.t["text"], insertbackground=self.t["text"],
+                 relief="flat").pack(side="left", padx=(0, 6))
+        tk.Label(row, text="minutes", font=("Segoe UI", 9), fg=self.t["muted"],
+                 bg=self.t["surface"]).pack(side="left")
+        sched_btn = tk.Label(row, text="Schedule", font=("Segoe UI", 9, "bold"),
+                              fg="#ffffff", bg=self.t["accent"], cursor="hand2", padx=12, pady=4)
+        sched_btn.pack(side="right")
+        sched_btn.bind("<Button-1>", self._schedule_download)
+
+    def _schedule_download(self, event=None):
+        url = self.url_var.get().strip()
+        if not url:
+            return
+        try:
+            mins = int(self.sched_mins.get())
+        except ValueError:
+            return
+        delay = max(1, mins) * 60
+        folder = self.config_data.get("download_folder", str(Path.home() / "Downloads" / "MediaExtractor"))
+        self.status_label.config(text=f"Scheduled in {mins} min: {url[:50]}...", fg=self.t["accent"])
+        for w in self.extra_frame.winfo_children():
+            w.destroy()
+        def delayed():
+            time.sleep(delay)
+            self._queue_download_one(url, folder)
+            self.after(0, lambda: self.status_label.config(text=f"Scheduled download complete", fg=self.t["success"]))
+        threading.Thread(target=delayed, daemon=True).start()
+
+    def _toggle_convert(self):
+        for w in self.extra_frame.winfo_children():
+            w.destroy()
+        card = tk.Frame(self.extra_frame, bg=self.t["surface"], highlightthickness=1,
+                        highlightbackground=self.t["border"])
+        card.pack(fill="x", pady=(0, 8))
+        tk.Label(card, text="Format Converter", font=("Segoe UI", 10, "bold"),
+                 fg=self.t["text"], bg=self.t["surface"]).pack(anchor="w", padx=12, pady=(8, 4))
+        tk.Label(card, text="Convert downloaded media to different formats (requires ffmpeg)",
+                 font=("Segoe UI", 8), fg=self.t["muted"], bg=self.t["surface"]).pack(anchor="w", padx=12)
+        row = tk.Frame(card, bg=self.t["surface"])
+        row.pack(fill="x", padx=12, pady=(4, 8))
+        for label, ctype in [("MP4 → GIF", "gif"), ("Extract Audio", "audio"), ("Compress", "compress")]:
+            btn = tk.Label(row, text=label, font=("Segoe UI", 9, "bold"),
+                           fg=self.t["accent"], bg=self.t["bg"], cursor="hand2", padx=10, pady=6)
+            btn.pack(side="left", padx=(0, 6))
+            btn.bind("<Button-1>", lambda e, t=ctype: self._convert_file(t))
+
+    def _convert_file(self, ctype):
+        filepath = filedialog.askopenfilename(filetypes=[("Media files", "*.mp4 *.mkv *.webm *.mp3 *.m4a")])
+        if not filepath:
+            return
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            messagebox.showwarning("ffmpeg not found", "Install ffmpeg and add it to your PATH.")
+            return
+        base = os.path.splitext(filepath)[0]
+        if ctype == "gif":
+            out = base + ".gif"
+            args = [ffmpeg, "-i", filepath, "-vf", "fps=15,scale=480:-1:flags=lanczos", "-y", out]
+        elif ctype == "audio":
+            out = base + ".mp3"
+            args = [ffmpeg, "-i", filepath, "-vn", "-acodec", "libmp3lame", "-ab", "320k", "-y", out]
+        elif ctype == "compress":
+            out = base + "_compressed.mp4"
+            args = [ffmpeg, "-i", filepath, "-vcodec", "libx264", "-crf", "28", "-preset", "fast", "-y", out]
+        else:
+            return
+        self.status_label.config(text="Converting...", fg=self.t["accent"])
+        def run():
+            try:
+                flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                subprocess.run(args, capture_output=True, creationflags=flags)
+                self.after(0, lambda: self.status_label.config(text=f"Converted: {os.path.basename(out)}", fg=self.t["success"]))
+            except Exception as e:
+                self.after(0, lambda: self.status_label.config(text=f"Error: {str(e)[:60]}", fg=self.t["danger"]))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _toggle_stats(self):
+        for w in self.extra_frame.winfo_children():
+            w.destroy()
+        stats = self.config_data.get("download_stats", {"total": 0, "bytes": 0, "platforms": {}})
+        card = tk.Frame(self.extra_frame, bg=self.t["surface"], highlightthickness=1,
+                        highlightbackground=self.t["border"])
+        card.pack(fill="x", pady=(0, 8))
+        tk.Label(card, text="Download Statistics", font=("Segoe UI", 10, "bold"),
+                 fg=self.t["text"], bg=self.t["surface"]).pack(anchor="w", padx=12, pady=(8, 4))
+        row = tk.Frame(card, bg=self.t["surface"])
+        row.pack(fill="x", padx=12, pady=4)
+        for label, val, color in [("Total", str(stats.get("total", 0)), self.t["accent"]),
+                                   ("Size", fmt_bytes(stats.get("bytes", 0)), self.t["success"]),
+                                   ("Platforms", str(len(stats.get("platforms", {}))), self.t["muted"])]:
+            sf = tk.Frame(row, bg=self.t["surface"])
+            sf.pack(side="left", fill="x", expand=True)
+            tk.Label(sf, text=val, font=("Segoe UI", 14, "bold"), fg=color,
+                     bg=self.t["surface"]).pack()
+            tk.Label(sf, text=label, font=("Segoe UI", 8), fg=self.t["muted"],
+                     bg=self.t["surface"]).pack()
+        platforms = stats.get("platforms", {})
+        if platforms:
+            tk.Label(card, text="By Platform", font=("Segoe UI", 8, "bold"),
+                     fg=self.t["muted"], bg=self.t["surface"]).pack(anchor="w", padx=12, pady=(4, 2))
+            for name, count in sorted(platforms.items(), key=lambda x: -x[1]):
+                prow = tk.Frame(card, bg=self.t["surface"])
+                prow.pack(fill="x", padx=12, pady=1)
+                tk.Label(prow, text=name, font=("Segoe UI", 9), fg=self.t["text"],
+                         bg=self.t["surface"]).pack(side="left")
+                tk.Label(prow, text=str(count), font=("Consolas", 9, "bold"), fg=self.t["accent"],
+                         bg=self.t["surface"]).pack(side="right")
+        tk.Frame(card, bg=self.t["surface"], height=8).pack()
+
+    def _update_stats(self, entry):
+        stats = self.config_data.get("download_stats", {"total": 0, "bytes": 0, "platforms": {}})
+        if entry.get("status") == "complete":
+            stats["total"] = stats.get("total", 0) + 1
+            stats["bytes"] = stats.get("bytes", 0) + entry.get("bytes", 0)
+            p = entry.get("platform", "Unknown")
+            if "platforms" not in stats:
+                stats["platforms"] = {}
+            stats["platforms"][p] = stats["platforms"].get(p, 0) + 1
+            self.config_data["download_stats"] = stats
+            save_config(self.config_data)
 
     # ── Documents Page ────────────────────────────────────────────
 
